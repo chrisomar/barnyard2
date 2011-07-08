@@ -259,6 +259,18 @@ typedef struct _FWsamoptions    /* snort rule options */
     unsigned char   loglevel;
 }   FWsamOptions;
 
+typedef struct _fwsam_rule_s
+{
+    uint64_t    sid;
+    uint64_t    duration;
+    uint8_t     who;
+    uint8_t     how;
+    uint8_t     loglevel;
+
+    struct _fwsam_rule_s    *next;
+} fwsam_rule_t;
+
+
 typedef struct _FWsamlistpointer
 {
     FWsamStation *station;
@@ -281,8 +293,16 @@ void FWsamFree(FWsamList *fwsamlist);
 int FWsamStationExists(FWsamStation *who, FWsamList *list);
 int FWsamReadLine(char *, unsigned long, FILE *);
 void FWsamParseLine(FWsamOptions *, char *);
+void FWsamPrintRule(FWsamOptions *optp);
 FWsamOptions *FWsamGetOption(unsigned long);
 int FWsamParseOption(FWsamOptions *, char *);
+
+
+fwsam_rule_t * FWsamRuleParse(const char *);
+int FWsamRuleAdd(fwsam_rule_t **, const char *);
+void FWsamRuleCleanAll(fwsam_rule_t *);
+void FWsamRulePrintAll(fwsam_rule_t *);
+
 
 
 /*
@@ -298,6 +318,7 @@ extern Barnyard2Config *barnyard2_conf;
 
 FWsamList *FWsamStationList=NULL;           /* Global (for all alert-types) list of snortsam stations */
 FWsamOptions *FWsamOptionField=NULL;
+fwsam_rule_t *fwsam_rule_list=NULL;
 unsigned long FWsamMaxOptions=0;
 
 
@@ -396,6 +417,7 @@ void AlertFWsamInit(char *args)
                     FWsamParseLine(&(FWsamOptionField[cnt++]),buf);
                 }
 
+                // sorted shift
                 if( FWsamMaxOptions>1 )
                 {
                     for(again=TRUE,cnt=FWsamMaxOptions-1; cnt>=1 && again; cnt--)
@@ -411,6 +433,9 @@ void AlertFWsamInit(char *args)
                         }
                     }
                 }
+
+                // performs a sorted insert of the rule
+                FWsamRuleAdd(&fwsam_rule_list, buf);
             }
             else
                 FWsamMaxOptions=1;
@@ -847,11 +872,120 @@ void FWsamParseLine(FWsamOptions *optp,char *buf)
 
         if(FWsamParseOption(optp,ap))
             LogMessage("WARNING %s (%d) => [Alert_FWsam](AlertFWamOptionInit) Possible option problem. Using %s[%s],%lu.\n",file_name,file_line,(optp->who==FWSAM_WHO_SRC)?"src":"dst",(optp->how==FWSAM_HOW_IN)?"in":((optp->how==FWSAM_HOW_OUT)?"out":"either"),optp->duration);
+        else
+          FWsamPrintRule(optp);
     }
     else
         optp->sid=0;
 }
 
+
+void FWsamPrintRule(FWsamOptions *optp)
+{
+  if ( NULL == optp )
+    return;
+
+  printf("Rule --------------\n");
+  printf("{\n");
+  printf("  sid:      %lu\n", optp->sid);
+  printf("  who:      %s\n", (optp->who==FWSAM_WHO_SRC)?"src":"dst");
+  printf("  how:      %s\n", (optp->how==FWSAM_HOW_IN)?"in":((optp->how==FWSAM_HOW_OUT)?"out":"either"));
+  printf("  duration: %lu s\n", optp->duration);
+  printf("}\n");
+}
+
+
+fwsam_rule_t * FWsamRuleParse(const char *line)
+{
+    fwsam_rule_t *rule = NULL;
+
+    if( NULL == line )
+        return NULL;
+
+    rule = malloc(sizeof(fwsam_rule_t));
+
+    if ( NULL == rule )
+    {
+        FatalError("ERROR: Unable to allocate memory for the FWsam Rule!\n");
+    }
+
+    // set defaults
+    rule->duration = 300;                 /* default of 5 minute block */
+    rule->how = FWSAM_HOW_INOUT;          /* inbound and outbound block */
+    rule->who = FWSAM_WHO_SRC;            /* the source  */
+    rule->loglevel = FWSAM_LOG_LONGALERT; /* the log level default */
+
+    // let's split it
+
+    return rule;
+}
+
+int FWsamRuleAdd(fwsam_rule_t **head, const char *line)
+{
+    fwsam_rule_t *iter = *head;
+    fwsam_rule_t *item;
+
+    item = FWsamRuleParse(line);
+
+    if ( NULL == item )
+    {
+        fprintf(stderr, "ERROR: Unable to load rule: %s!\n", line);
+        return 1;
+    }
+
+    if ( NULL == iter )
+    {
+        *head = item;
+    }
+    else
+    {
+        while (NULL != iter->next)
+            iter = iter->next;
+
+        iter->next = item;
+    }
+
+    return 0;
+}
+
+void FWsamRulePrint(fwsam_rule_t *rule)
+{
+  if ( NULL == rule )
+    return;
+
+  printf("Rule --------------\n");
+  printf("{\n");
+  printf("  sid:      %lu\n", rule->sid);
+  printf("  who:      %s\n", (rule->who==FWSAM_WHO_SRC)?"src":"dst");
+  printf("  how:      %s\n", (rule->how==FWSAM_HOW_IN)?"in":((rule->how==FWSAM_HOW_OUT)?"out":"either"));
+  printf("  duration: %lu s\n", rule->duration);
+  printf("}\n");
+}
+
+
+void FWsamRulePrintAll(fwsam_rule_t *head)
+{
+    fwsam_rule_t *iter = head;
+
+    while( NULL != iter )
+    {
+        FWsamRulePrint(iter);
+        iter = iter->next;
+    }
+}
+void FWsamRuleCleanAll(fwsam_rule_t *head)
+{
+    fwsam_rule_t *iter = head;
+    fwsam_rule_t *item;
+
+    while( NULL != iter )
+    {
+        item = iter;
+        iter = iter->next;
+
+        free(item);
+    }
+}
 
 /* Generates a new encryption key for TwoFish based on seq numbers and a random that
  * the SnortSam agents send on checkin (in protocol)
@@ -977,7 +1111,6 @@ void AlertFWsam(Packet *p, void *event, uint32_t event_type, void *arg)
 
     SigNode     *sn = NULL;
     ClassType   *cn = NULL;
-    ReferenceNode   *rn = NULL;
 
 
     if(event==NULL)
@@ -1499,6 +1632,8 @@ void FWsamFree(FWsamList *list)
     FWsamStationList=NULL;
     if(FWsamOptionField)
         free(FWsamOptionField);
+
+    FWsamRuleCleanAll(fwsam_rule_list);
 }
 
 void AlertFWsamCleanExitFunc(int signal, void *arg)
